@@ -1,0 +1,534 @@
+---
+title: "Energy & Environment"
+author: "Hanxi Gu"
+date: "2024-02-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Data Source
+
+| File          | Description                                                                                                                 |
+|---------------|-----------------------------------------------------------------------------------------------------------------------------|
+| Emission.csv  | CO2 emissions (metric tons per capita); Emissions data are sourced from Climate Watch Historical GHG Emissions ( 1990-2020 ). 2023. Washington, DC: World Resources Institute. Available online at: https://data.worldbank.org/indicator/EN.ATM.CO2E.PC. |
+| Renewable.csv  | Renewable energy consumption (% of total final energy consumption); IEA, IRENA, UNSD, World Bank, WHO. 2023. Tracking SDG 7: The Energy Progress Report. World Bank, Washington DC. © World Bank. License: Creative Commons Attribution—NonCommercial 3.0 IGO ( CC BY-NC 3.0 IGO ). Available online at: https://data.worldbank.org/indicator/EG.FEC.RNEW.ZS. |
+| GDPPCAP.csv   | GDP per capita (current US$); World Bank national accounts data, and OECD National Accounts data files. Available online at: https://data.worldbank.org/indicator/NY.GDP.PCAP.CD |
+
+
+## Individual Dataset Cleansing & Analysis
+
+```{r}
+# Package loading
+library(tidyverse)
+library(ggcorrplot)
+library(plotly)
+library(plm)
+```
+
+### Carbon Emission per Capita Dataset
+
+```{r}
+# Data loading
+df1 = read_csv("Emission.csv")
+df1
+```
+
+```{r}
+# Rename column
+names(df1)[names(df1) == "Country Name"] <- "Country_Name"
+names(df1)[names(df1) == "Country Code"] <- "Country_Code"
+names(df1)[names(df1) == "Indicator Name"] <- "Indicator_Name"
+names(df1)[names(df1) == "Indicator Code"] <- "Indicator_Code"
+```
+
+```{r}
+# Data inspection
+# Statistics function
+summarize_numeric = function(dataset) {
+  
+  dataset = select_if(dataset, is.numeric)
+  summary.table = data.frame(Attribute = names(dataset))
+  
+  summary.table = summary.table %>% 
+    mutate("Missing Values" = apply(dataset, 2, function (x) sum(is.na(x))),
+           "Unique Values" = apply(dataset, 2, function (x) length(unique(x))),
+           "Mean" = colMeans(dataset, na.rm = TRUE),
+           "Min" = apply(dataset, 2, function (x) min(x, na.rm = TRUE)),
+           "Max" = apply(dataset, 2, function (x) max(x, na.rm = TRUE)),
+           "SD" = apply(dataset, 2, function (x) sd(x, na.rm = TRUE))
+    )
+  summary.table
+}
+
+# Statistics display
+summarize_numeric(df1)
+```
+
+```{r}
+# Replace the missing value with the interpolate method
+# Function to interpolate missing values
+interpolate_missing <- function(x) {
+  first_non_na <- which(!is.na(x))[1]  # Find first non-NA value
+  last_non_na <- tail(which(!is.na(x)), 1)  # Find last non-NA value
+  interpolated_values <- approx(
+    x = c(first_non_na, last_non_na),
+    y = x[c(first_non_na, last_non_na)],
+    xout = which(is.na(x))
+  )$y  # Interpolate missing values
+  replace(x, which(is.na(x)), interpolated_values)  # Replace missing values
+}
+
+# Apply the function across relevant columns
+df1 <- df1 %>%
+  mutate(across(matches("^19\\d{2}$"), interpolate_missing))
+```
+
+```{r}
+# Drop remaining missing values
+df1 <- df1 %>%
+  drop_na()
+
+# Check missing value again
+sum(is.na(df1))
+```
+
+```{r}
+# Data transformation for analysis purpose
+df1_long <- df1 %>% pivot_longer(cols = -c("Country_Name", "Country_Code", "Indicator_Name", "Indicator_Code"), 
+                                    names_to = "Year", 
+                                    values_to = "CO2E_PC")
+df1_long <- df1_long %>%
+  select(-Indicator_Name, -Indicator_Code)
+df1_long
+```
+
+```{r}
+# Finding the two countries with the largest CO2 emissions over time and the two countries with the least CO2 emissions over time
+# Aggregate data by country to find total emissions over time
+country_total_emissions <- df1_long %>%
+  group_by(Country_Name) %>%
+  summarise(total_emissions = sum(CO2E_PC, na.rm = TRUE)) %>%
+  arrange(desc(total_emissions))
+
+# Select top 2 and bottom 2 countries based on total emissions
+top_countries <- head(country_total_emissions, 2)
+top_countries
+
+bottom_countries <- tail(country_total_emissions, 2)
+bottom_countries
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+# Visualization of the world CO2 emissions
+# Filter the rows of research interest
+world_data1 <- df1_long %>% filter(Country_Name %in% c("World", "Qatar", "United Arab Emirates", "United States", "China"))
+
+# Convert "Year" to numeric
+world_data1$Year <- as.numeric(world_data1$Year)
+
+# Plot the trend
+ggplot() +
+  geom_line(data = world_data1, aes(x = Year, y = CO2E_PC, color = Country_Name)) +
+  labs(x = "Year", y = "CO2 emissions (metric tons per capita)", title = "Trend of World CO2 Emissions per Capita") +
+  scale_x_continuous(breaks = seq(1960, 2020, by = 5)) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "gray", linetype = "dotted"),
+        axis.line = element_line(color = "gray", size = 0.5))
+```
+
+```{r}
+# Interactive heat map showing the world CO2 emission in 2020
+world_map_2020 <- df1_long %>%
+  filter(Year == "2020")
+
+zmin <- min(world_map_2020$CO2E_PC, na.rm = TRUE)
+zmax <- max(world_map_2020$CO2E_PC, na.rm = TRUE)
+
+map <- plot_geo() %>%
+  add_trace(
+    data = world_map_2020,
+    type = 'choropleth',
+    locations = ~Country_Name,
+    locationmode = "country names",
+    z = ~CO2E_PC,
+    colorscale = "Viridis",
+    colorbar = list(title = "CO2 Emissions"),
+    hoverinfo = "text",
+    text = ~paste(" Country: ", Country_Name, "<br>",
+                  "CO2 Emissions: ", CO2E_PC, "<br>",
+                  "Year: ", Year),
+    zmin = zmin,
+    zmax = zmax
+  ) %>%
+  layout(
+    title = "World CO2 Emissions per Capita in 2020",
+    yaxis = list(title = "CO2 Emissions")
+  )
+
+map
+```
+
+```{r}
+# The country with the maximum CO2 emission per capita in 2020
+max_index <- which.max(world_map_2020$CO2E_PC)
+world_map_2020$Country_Name[max_index]
+
+# The country with the minimum CO2 emission per capita in 2020
+min_index <- which.min(world_map_2020$CO2E_PC)
+world_map_2020$Country_Name[min_index]
+```
+
+### Renewable Energy Consumption Dataset
+
+```{r}
+# Data loading
+df2 = read_csv("Renewable.csv")
+df2
+```
+
+```{r}
+# Rename column
+names(df2)[names(df2) == "Country Name"] <- "Country_Name"
+names(df2)[names(df2) == "Country Code"] <- "Country_Code"
+names(df2)[names(df2) == "Indicator Name"] <- "Indicator_Name"
+names(df2)[names(df2) == "Indicator Code"] <- "Indicator_Code"
+```
+
+```{r}
+# Statistics display
+summarize_numeric(df2)
+```
+
+```{r}
+# Replace the missing value with the interpolate method
+# Function to interpolate missing values
+interpolate_missing <- function(x) {
+  first_non_na <- which(!is.na(x))[1]  # Find first non-NA value
+  last_non_na <- tail(which(!is.na(x)), 1)  # Find last non-NA value
+  interpolated_values <- approx(
+    x = c(first_non_na, last_non_na),
+    y = x[c(first_non_na, last_non_na)],
+    xout = which(is.na(x))
+  )$y  # Interpolate missing values
+  replace(x, which(is.na(x)), interpolated_values)  # Replace missing values
+}
+
+# Apply the function across relevant columns
+df2 <- df2 %>%
+  mutate(across(matches("^19\\d{2}$"), interpolate_missing))
+```
+
+```{r}
+# Drop remaining missing values
+df2 <- df2 %>%
+  drop_na()
+
+# Check missing value again
+sum(is.na(df2))
+```
+
+```{r}
+# Data transformation for analysis purpose
+df2_long <- df2 %>% pivot_longer(cols = -c("Country_Name", "Country_Code", "Indicator_Name", "Indicator_Code"), 
+                                    names_to = "Year", 
+                                    values_to = "RENEW_C")
+df2_long <- df2_long %>%
+  select(-Indicator_Name, -Indicator_Code)
+df2_long
+```
+
+```{r}
+# Finding the two countries with the largest renewable energy consumption% over time and the two countries with the least renewable energy consumption% over time
+# Aggregate data by country to find mean consumption% over time
+country_mean_conspt <- df2_long %>%
+  group_by(Country_Name) %>%
+  summarise(total_conspt = mean(RENEW_C, na.rm = TRUE)) %>%
+  arrange(desc(total_conspt))
+
+# Select top 2 and bottom 2 countries based on mean consumption%
+top_countries <- head(country_mean_conspt, 2)
+top_countries
+
+bottom_countries <- tail(country_mean_conspt, 2)
+bottom_countries
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+# Visualization of the world renewable energy consumption% 
+# Filter the rows of research interest
+world_data2 <- df2_long %>% filter(Country_Name %in% c("World", "Congo, Dem. Rep.", "Uganda", "United States", "China"))
+
+# Convert "Year" to numeric
+world_data2$Year <- as.numeric(world_data1$Year)
+
+# Plot the trend
+ggplot() +
+  geom_line(data = world_data2, aes(x = Year, y = RENEW_C, color = Country_Name)) +
+  labs(x = "Year", y = "Renewable Energy Consumption (% of total final energy consumption)", title = "Trend of World Renewable Energy Consumption %") +
+  scale_x_continuous(breaks = seq(1960, 2020, by = 5)) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "gray", linetype = "dotted"),
+        axis.line = element_line(color = "gray", size = 0.5))
+```
+
+```{r}
+# Interactive heat map showing the world renewable energy consumption% in 2020
+world_map_2020_renew <- df2_long %>%
+  filter(Year == "2020")
+
+zmin <- min(world_map_2020_renew$RENEW_C, na.rm = TRUE)
+zmax <- max(world_map_2020_renew$RENEW_C, na.rm = TRUE)
+
+map <- plot_geo() %>%
+  add_trace(
+    data = world_map_2020_renew,
+    type = 'choropleth',
+    locations = ~Country_Name,
+    locationmode = "country names",
+    z = ~RENEW_C,
+    colorscale = "Viridis",
+    colorbar = list(title = "RENEW_C %"),
+    hoverinfo = "text",
+    text = ~paste(" Country: ", Country_Name, "<br>",
+                  "RENEW_C %: ", RENEW_C, "<br>",
+                  "Year: ", Year),
+    zmin = zmin,
+    zmax = zmax
+  ) %>%
+  layout(
+    title = "World Renewable Energy Consumption% in 2020",
+    yaxis = list(title = "RENEW_C %")
+  )
+
+map
+```
+
+```{r}
+# The country with the maximum Renewable Energy Consumption% in 2020
+max_index <- which.max(world_map_2020_renew$RENEW_C)
+world_map_2020_renew$Country_Name[max_index]
+
+# The country with the minimum Renewable Energy Consumption% in 2020
+min_index <- which.min(world_map_2020_renew$RENEW_C)
+world_map_2020_renew$Country_Name[min_index]
+```
+
+### Research Question 1: Do countries with higher shares of renewable energy consumption tend to have lower carbon dioxide emissions per capita?
+
+```{r}
+# Merge the two data frames
+merged_data1 <- inner_join(df1_long, df2_long, by = c("Country_Name", "Country_Code", "Year"))
+```
+
+```{r}
+# Method 1
+# Panel data analysis - fixed effect
+# Convert Year to a factor
+merged_data1$Year <- as.factor(merged_data1$Year)
+
+# Fit a fixed effects model
+model1 <- plm(CO2E_PC ~ RENEW_C, data = merged_data1, index = c("Country_Name", "Country_Code", "Year"), model = "within")
+
+# Summarize the model
+summary(model1)
+```
+
+The coefficient estimate for RENEW_C is -0.054637. This means that, on average, a one-unit increase in the share of renewable energy consumption is associated with a decrease of approximately 0.054637 units in CO2 emissions per capita. The coefficient estimate for RENEW_C is statistically significant, as indicated by the p-value (< 2.2e-16), which is much smaller than the conventional significance level of 0.05. This suggests strong evidence against the null hypothesis that the true coefficient is zero.
+
+```{r}
+# Method 2
+# Calculate compound growth rate for CO2 emissions
+aggregated_data1 <- merged_data1 %>%
+  arrange(Country_Name, Country_Code, Year) %>%
+  group_by(Country_Name, Country_Code) %>%
+  summarize(compound_growth_CO2 = ifelse(first(CO2E_PC) == 0, NA, 
+                                         (last(CO2E_PC) / first(CO2E_PC))^(1 / (n() - 1)) - 1))
+
+# Calculate compound growth rate for renewable energy consumption
+aggregated_data2 <- merged_data1 %>%
+  arrange(Country_Name, Country_Code, Year) %>%
+  group_by(Country_Name, Country_Code) %>%
+  summarize(compound_growth_RENEW = ifelse(first(RENEW_C) == 0, NA, 
+                                         (last(RENEW_C) / first(RENEW_C))^(1 / (n() - 1)) - 1))
+
+# Merge
+merged_data2 <- inner_join(aggregated_data1, aggregated_data2, by = c("Country_Name", "Country_Code"))
+merged_data2
+```
+```{r}
+# Drop remaining missing values
+merged_data2 <- merged_data2 %>%
+  drop_na()
+
+# Fit a linear regression model
+model2 <- lm(compound_growth_CO2 ~ compound_growth_RENEW, data = merged_data2)
+
+summary(model2)
+```
+
+The estimated change in compound_growth_CO2 for a one-unit increase in compound_growth_RENEW. Here, it's -0.442450, indicating that, on average, a one-unit increase in compound growth in renewable energy consumption is associated with a decrease of 0.442450 units in compound growth in CO2 emissions. The p-value associated with compound_growth_RENEW is very low (p < 2e-16), indicating that compound_growth_RENEW is significantly associated with compound_growth_CO2. It indicates that higher growth in renewable energy consumption associated with lower growth in CO2 emissions.
+
+Both methods suggest similar conclusion of the relationship between the renewable energy consumption and the CO2 emissions per capita. However, the adjusted R-squared of the second model is higher than the first model.
+
+### Research Question 2: Are there notable exceptions or outliers where countries have high renewable energy consumption growth rate but still high carbon emissions growth rate?
+
+```{r}
+# Calculate residuals
+merged_data2$residuals <- residuals(model2)
+
+# Identify outliers
+outliers <- merged_data2 %>%
+  filter(abs(residuals) > 2 * sd(residuals)) %>%
+  arrange(desc(residuals))
+
+outliers
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+# Scatter plot and display the mean of the two variables in aggregated_data
+ggplot(merged_data2, aes(x = compound_growth_RENEW, y = compound_growth_CO2)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "#6D9EC1") +
+  geom_hline(yintercept = mean(merged_data2$compound_growth_CO2), linetype = "dashed", color = "#E46726") +
+  geom_vline(xintercept = mean(merged_data2$compound_growth_RENEW), linetype = "dashed", color = "#E46726") +
+  labs(x = "Renewable Energy Consumption CAGR", y = "CO2 Emissions per Capita CAGR", title = "Scatter Plot of CO2 Emissions CAGR vs. Renewable Energy Consumption CAGR") +
+  theme(plot.title = element_text(hjust = 0.5), 
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "gray", linetype = "dotted"),
+        axis.line = element_line(color = "gray", size = 0.5))
+```
+
+```{r}
+# Identify the above-average countries
+high_renew_high_co2_countries <- merged_data2 %>%
+  filter(compound_growth_RENEW > mean(merged_data2$compound_growth_RENEW) & compound_growth_CO2 > mean(merged_data2$compound_growth_CO2))
+
+high_renew_high_co2_countries
+```
+
+Based on the standard deviation calculation, there are no outliers where countries exhibit both high renewable energy consumption growth rate and high carbon emissions growth rate. However, the above six countries stand out, as they have relatively high growth in percentages of renewable energy consumption, yet their growth in CO2 emissions per capita remain above average.
+
+Possible reasons could be: 
+
+Korea, Rep. (KOR) and Saudi Arabia (SAU) are known for their rapid economic development and industrialization, which can contribute to increased energy demand and higher CO2 emissions. Uruguay (URY) has experienced significant economic growth in recent years, which may lead to higher energy consumption and emissions despite efforts to increase renewable energy usage.
+
+Tonga (TON) may rely heavily on fossil fuels for energy generation due to limited access to renewable energy sources, resulting in higher CO2 emissions despite efforts to increase renewable energy consumption.
+
+Cambodia (KHM) has experienced rapid population growth, which can contribute to increased energy demand and higher CO2 emissions even if renewable energy consumption is also increasing.
+
+Grenada (GRD) may lack comprehensive energy efficiency measures, resulting in lower overall energy efficiency and higher CO2 emissions despite efforts to increase renewable energy usage.
+
+### Research Question 3: Is there a relationship between a country's GDP per capita and its consumption of clean energy technologies?
+
+```{r}
+# Data loading
+df3 = read_csv("GDPPCAP.csv")
+df3
+```
+
+```{r}
+# Rename column
+names(df3)[names(df3) == "Country Name"] <- "Country_Name"
+names(df3)[names(df3) == "Country Code"] <- "Country_Code"
+names(df3)[names(df3) == "Indicator Name"] <- "Indicator_Name"
+names(df3)[names(df3) == "Indicator Code"] <- "Indicator_Code"
+```
+
+```{r}
+# Statistics display
+summarize_numeric(df3)
+```
+
+```{r}
+# Replace the missing value with the interpolate method
+# Function to interpolate missing values
+interpolate_missing <- function(x) {
+  first_non_na <- which(!is.na(x))[1]  # Find first non-NA value
+  last_non_na <- tail(which(!is.na(x)), 1)  # Find last non-NA value
+  interpolated_values <- approx(
+    x = c(first_non_na, last_non_na),
+    y = x[c(first_non_na, last_non_na)],
+    xout = which(is.na(x))
+  )$y  # Interpolate missing values
+  replace(x, which(is.na(x)), interpolated_values)  # Replace missing values
+}
+
+# Apply the function across relevant columns
+df3 <- df3 %>%
+  mutate(across(matches("^19\\d{2}$"), interpolate_missing))
+```
+
+```{r}
+# Drop remaining missing values
+df3 <- df3 %>%
+  drop_na()
+
+# Check missing value again
+sum(is.na(df3))
+```
+
+```{r}
+# Data transformation for analysis purpose
+df3_long <- df3 %>% pivot_longer(cols = -c("Country_Name", "Country_Code", "Indicator_Name", "Indicator_Code"), 
+                                    names_to = "Year", 
+                                    values_to = "GDP_PC")
+df3_long <- df3_long %>%
+  select(-Indicator_Name, -Indicator_Code)
+df3_long
+```
+
+
+```{r}
+# Merge the GDP per capita data
+merged_data3 <- inner_join(merged_data1, df3_long, by = c("Country_Name", "Country_Code", "Year"))
+merged_data3
+```
+
+```{r}
+# Method 1
+# Panel data analysis - fixed effect
+# Convert Year to a factor
+merged_data3$Year <- as.factor(merged_data3$Year)
+
+# Fit a fixed effects model
+model3 <- plm(RENEW_C ~ CO2E_PC + GDP_PC, data = merged_data3, index = c("Country_Name", "Country_Code", "Year"), model = "within")
+
+# Summarize the model
+summary(model3)
+```
+
+The coefficient estimate for GDP_PC is approximately 1.8281e-05, indicating that a one-unit increase in GDP per capita is associated with an increase of approximately 1.8281e-05 units in renewable energy consumption, holding other variables constant. This suggests that higher GDP per capita tends to be associated with a slight increase in renewable energy consumption. However, with a p-value of 0.1194, the coefficient estimate for GDP_PC is not statistically significant at conventional significance levels (such as α = 0.05). Therefore, we do not have sufficient evidence to conclude that the relationship between GDP per capita and renewable energy consumption is statistically significant in this regression model.
+
+```{r}
+# Method 2
+# Calculate compound growth rate for GDP per capita
+aggregated_data3 <- merged_data3 %>%
+  arrange(Country_Name, Country_Code, Year) %>%
+  group_by(Country_Name, Country_Code) %>%
+  summarize(compound_growth_GDPPC = ifelse(first(GDP_PC) == 0, NA, 
+                                         (last(GDP_PC) / first(GDP_PC))^(1 / (n() - 1)) - 1))
+
+# Merge
+merged_data2 <- inner_join(merged_data2, aggregated_data3, by = c("Country_Name", "Country_Code"))
+merged_data2
+```
+
+```{r}
+# Drop remaining missing values
+merged_data2 <- merged_data2 %>%
+  drop_na()
+
+# Fit a linear regression model
+model4 <- lm(compound_growth_CO2 ~ compound_growth_RENEW + compound_growth_GDPPC, data = merged_data2)
+
+summary(model4)
+```
+
+After transforming GDP_PC into CAGR_GDP_PC, the coefficient is 0.2345, indicating that for every unit increase in compound_growth_GDPPC, compound_growth_CO2 is estimated to increase by 0.2345 units. This effect is also highly significant (p = 3.64e-06). Additionally, approximately 42.33% of the variability in compound_growth_CO2 is explained by the predictors in this model. Therefore, this model is overall significant and provides a better estimation of the relationships.
